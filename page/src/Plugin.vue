@@ -94,7 +94,7 @@
           <v-text-field
             v-model="settings.data_home"
             label="Data directory"
-            :hint="recommendedPath ? 'Suggested: ' + recommendedPath : 'Persistent config, data and state for OpenCode'"
+            hint="Persistent config, data and state for OpenCode"
             persistent-hint
             class="mt-2"
           >
@@ -358,7 +358,6 @@ const latestVersion = ref('');
 const updateAvailable = ref(false);
 const logs = ref('');
 const error = ref('');
-const recommendedPath = ref('');
 const statusInterval = ref(null);
 
 const snackbar = ref(false);
@@ -449,22 +448,6 @@ const fetchSettings = async () => {
         if (data[key] !== undefined) settings[key] = data[key];
       }
       if (data.version) currentVersion.value = data.version;
-    }
-
-    if (!settings.data_home) {
-      try {
-        const dockerRes = await fetch('/api/v1/mos/settings/docker', {
-          headers: getAuthHeaders(),
-        });
-        if (dockerRes.ok) {
-          const dockerData = await dockerRes.json();
-          if (dockerData.appdata) {
-            recommendedPath.value = dockerData.appdata + '/opencode-v2';
-          }
-        }
-      } catch (e) {
-        console.error('Failed to fetch docker settings:', e);
-      }
     }
   } catch (e) {
     console.error('Failed to fetch settings:', e);

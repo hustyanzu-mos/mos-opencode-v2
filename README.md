@@ -91,7 +91,7 @@ $data_home/opencode-v2/
    https://github.com/hustyanzu-mos/mos-templates
    ```
 2. 安装 **OpenCode v2** 插件。
-3. 打开插件页面，设置 **Data directory**（建议 pool 里的 appdata 目录）。
+3. 打开插件页面，设置 **Data directory**。
 4. 点 **Install**。安装是异步的，页面会轮询进度。
 5. 默认 server 关闭，不需要点 Start。
 
