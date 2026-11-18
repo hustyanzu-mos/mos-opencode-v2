@@ -215,6 +215,7 @@ JSON
 }
 
 write_service_config() {
+  local disabled="${1:-true}"
   local cfg tmp host port pass cors
   cfg="$DATA_HOME/config/opencode/service.json"
   host="$(setting hostname)"
@@ -236,9 +237,10 @@ write_service_config() {
     printf '{}\n' > "$tmp"
   fi
 
-  # disabled:true means OpenCode will not start a second service on its own.
-  # The plugin starts it explicitly with `serve --service` when enabled.
-  if ! jq --arg h "$host" --arg p "$port" '.hostname = $h | .port = ($p | tonumber) | .disabled = true' "$tmp" > "$tmp.next" 2>/dev/null; then
+  # disabled=true makes the OpenCode TUI use a standalone local server.
+  # disabled=false lets it discover and use the plugin's background service.
+  if ! jq --arg h "$host" --arg p "$port" --arg d "$disabled" \
+      '.hostname = $h | .port = ($p | tonumber) | .disabled = ($d == "true")' "$tmp" > "$tmp.next" 2>/dev/null; then
     rm -f "$tmp" "$tmp.next"
     fail "cannot write service configuration"
   fi
@@ -333,7 +335,7 @@ cmd_start() {
   fi
   ensure_binary
   DATA_HOME="$(data_home)"
-  write_service_config
+  write_service_config false
   write_update_config
 
   local exe pid url i
@@ -398,6 +400,9 @@ cmd_stop() {
     fi
     rm -f "$PID_FILE"
   fi
+  if [ -n "$DATA_HOME" ] && [ -x "$exe" ]; then
+    write_service_config true >/dev/null 2>&1 || true
+  fi
   say "Stopped"
 }
 
@@ -418,9 +423,9 @@ cmd_logs() {
 cmd_apply_service() {
   ensure_settings
   DATA_HOME="$(data_home)"
-  write_service_config
-  write_update_config
   if ! server_enabled; then
+    write_service_config true
+    write_update_config
     cmd_stop >/dev/null 2>&1 || true
     say "OpenCode server is disabled"
     return 0
@@ -428,6 +433,8 @@ cmd_apply_service() {
   if is_running; then
     cmd_restart
   else
+    write_service_config true
+    write_update_config
     say "Service settings saved"
   fi
 }

@@ -151,8 +151,13 @@ Server 配置写入：
 $data_home/opencode-v2/config/opencode/service.json
 ```
 
-`service.json` 里的 `disabled` 固定为 `true`，意思是“不要让 OpenCode 自己
-再启动一个 service”；插件页面的 **Start** 会显式启动它。
+`service.json` 里的 `disabled` 会随状态变化：
+
+- server 关闭：`disabled: true`，TUI 使用 standalone/local server
+- server 开启且正在运行：`disabled: false`，TUI 连接插件的后台 service
+- server 开启但已停止：`disabled: true`，TUI 不会偷偷拉起 service
+
+插件页面的 **Start** 会显式启动 service。
 
 ---
 

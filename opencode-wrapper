@@ -59,6 +59,26 @@ export OPENCODE_DISABLE_AUTOUPDATE=1
 
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" 2>/dev/null || true
 
+# With the server off, make the TUI use a standalone local server.
+# With the server on, the backend owns service.json (false while running,
+# true while stopped) so the TUI can discover the plugin's service.
+SERVER_ENABLED=$(jq -r '.server_enabled // false' "$SETTINGS" 2>/dev/null)
+if [ "$SERVER_ENABLED" != "true" ]; then
+  SERVICE_JSON="$XDG_CONFIG_HOME/opencode/service.json"
+  mkdir -p "$(dirname "$SERVICE_JSON")" 2>/dev/null || true
+  if [ -f "$SERVICE_JSON" ] && jq empty "$SERVICE_JSON" >/dev/null 2>&1; then
+    tmp="$SERVICE_JSON.$$"
+    if jq '.disabled = true' "$SERVICE_JSON" > "$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$SERVICE_JSON"
+    else
+      rm -f "$tmp"
+    fi
+  else
+    printf '{"disabled": true}\n' > "$SERVICE_JSON"
+  fi
+  chmod 600 "$SERVICE_JSON" 2>/dev/null || true
+fi
+
 [ -d "$WORK_DIR" ] || WORK_DIR="/"
 cd "$WORK_DIR" 2>/dev/null || cd /
 
