@@ -39,11 +39,8 @@
 | 下载 | 同步，可能 60 秒超时 | 异步后台下载 + 轮询 |
 | 插件内部名 | `opencode` | `opencode-v2` |
 
-本插件安装 `/usr/bin/opencode-v2`。如果 `/usr/bin/opencode` 还不存在，
-安装时会创建一个指向 `opencode-v2` 的符号链接。
-
-如果官方 OpenCode 插件已经占用了 `/usr/bin/opencode`，本插件不会覆盖它，
-也不会和它发生 dpkg 文件冲突；此时请使用 `opencode-v2`，或先卸载官方插件。
+本插件直接使用 `/usr/bin/opencode`，和官方 `mos-opencode` 一致。
+安装前请确认没有同时安装官方 OpenCode 插件。
 
 ---
 
@@ -70,21 +67,20 @@ $data_home/opencode-v2/
 运行时：
 
 ```text
-/usr/bin/opencode-v2.real    # 从 /boot 复制，解决 noexec
+/usr/bin/opencodeorig        # 从 /boot 复制，解决 noexec
 /usr/bin/opencode            # wrapper
-/usr/bin/opencode-v2         # wrapper（同一个脚本）
-/var/run/mos-opencode-v2.pid
+/var/run/mos-opencode.pid
 ```
 
 | 内容 | 位置 | 重启后 |
 | --- | --- | --- |
 | 二进制 | `/boot/optional/plugins/opencode-v2/bin/opencode` | 保留 |
-| 运行时副本 | `/usr/bin/opencode-v2.real` | RAM，`mos_start` 恢复 |
+| 运行时副本 | `/usr/bin/opencodeorig` | RAM，`mos_start` 恢复 |
 | 插件设置 | `/boot/optional/plugins/opencode-v2/settings.json` | 保留 |
 | config | `$data_home/opencode-v2/config/opencode/` | 保留 |
 | data | `$data_home/opencode-v2/data/` | 保留 |
 | state | `$data_home/opencode-v2/state/` | 保留 |
-| PID | `/var/run/mos-opencode-v2.pid` | 丢失 |
+| PID | `/var/run/mos-opencode.pid` | 丢失 |
 
 ---
 
@@ -122,7 +118,7 @@ OpenCode 有三条更新路径：
 - 在 `$data_home/opencode-v2/config/opencode/opencode.json` 写入
   `"update": "disable"`
 - `/usr/bin/opencode` 拦截 `update` / `upgrade`
-- 二进制放在 `/usr/bin/opencode-v2.real`，不是 OpenCode 认识的
+- 二进制放在 `/usr/bin/opencodeorig`，不是 OpenCode 认识的
   `$HOME/.opencode/bin/opencode`，所以 TUI 的 `/update` 只会提示
   “Could not detect the installation method”，不会安装
 
@@ -175,7 +171,7 @@ $data_home/opencode-v2/config/opencode/service.json
 
 卸载：
 
-- **Uninstall binary** 只删除 `/boot` 里的二进制和 `/usr/bin/opencode-v2.real`
+- **Uninstall binary** 只删除 `/boot` 里的二进制和 `/usr/bin/opencodeorig`
 - config、data、sessions 保留
 - 要彻底删除数据，手动删除 `$data_home/opencode-v2`
 

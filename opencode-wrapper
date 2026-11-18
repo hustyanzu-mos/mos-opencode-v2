@@ -5,11 +5,11 @@
 # OpenCode's own updater. The plugin page owns the binary version.
 #
 # Persistent data: /boot/optional/plugins/opencode-v2
-# Runtime binary:  /usr/bin/opencode-v2.real
+# Runtime binary:  /usr/bin/opencodeorig
 
 PLG_DIR="${OPENCODE_V2_PLUGIN_DIR:-/boot/optional/plugins/opencode-v2}"
 SETTINGS="$PLG_DIR/settings.json"
-BIN="${OPENCODE_V2_RUNTIME_BIN:-/usr/bin/opencode-v2.real}"
+BIN="${OPENCODE_V2_RUNTIME_BIN:-/usr/bin/opencodeorig}"
 
 case "${1:-}" in
   update|upgrade)

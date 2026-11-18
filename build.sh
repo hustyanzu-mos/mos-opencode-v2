@@ -48,7 +48,7 @@ mkdir -p \
   "$PKG_DIR/var/www/mos-plugins/opencode-v2"
 
 install -m 0755 "$ROOT/opencode-backend" "$PKG_DIR/usr/bin/plugins/opencode-v2"
-install -m 0755 "$ROOT/opencode-wrapper" "$PKG_DIR/usr/bin/opencode-v2"
+install -m 0755 "$ROOT/opencode-wrapper" "$PKG_DIR/usr/bin/opencode"
 
 install -m 0755 "$ROOT/opencode-backend" "$PKG_DIR/usr/share/opencode-v2-plugin/opencode-backend"
 install -m 0755 "$ROOT/opencode-wrapper" "$PKG_DIR/usr/share/opencode-v2-plugin/opencode-wrapper"
@@ -77,10 +77,7 @@ set -e
 PLG=/boot/optional/plugins/opencode-v2
 SHARE=/usr/share/opencode-v2-plugin
 mkdir -p "$PLG/bin" "$PLG/config" "$PLG/data" "$PLG/state"
-chmod 0755 /usr/bin/plugins/opencode-v2 /usr/bin/opencode-v2 2>/dev/null || true
-if [ ! -e /usr/bin/opencode ] && [ ! -L /usr/bin/opencode ]; then
-  ln -s opencode-v2 /usr/bin/opencode
-fi
+chmod 0755 /usr/bin/plugins/opencode-v2 /usr/bin/opencode 2>/dev/null || true
 for f in opencode-backend opencode-wrapper functions; do
   cp -f "$SHARE/$f" "$PLG/$f"
 done
@@ -89,7 +86,7 @@ if [ ! -f "$PLG/settings.json" ]; then
   cp -f "$SHARE/settings.json" "$PLG/settings.json"
 fi
 if [ -x "$PLG/bin/opencode" ]; then
-  install -m 0755 "$PLG/bin/opencode" /usr/bin/opencode-v2.real 2>/dev/null || true
+  install -m 0755 "$PLG/bin/opencode" /usr/bin/opencodeorig 2>/dev/null || true
   if [ "$(jq -r '.server_enabled // false' "$PLG/settings.json" 2>/dev/null)" = "true" ] && \
      [ "$(jq -r '.auto_start // true' "$PLG/settings.json" 2>/dev/null)" = "true" ]; then
     /usr/bin/plugins/opencode-v2 start >/dev/null 2>&1 || true
@@ -110,10 +107,7 @@ chmod 0755 "$PKG_DIR/DEBIAN/prerm"
 
 cat > "$PKG_DIR/DEBIAN/postrm" <<'EOF'
 #!/bin/bash
-if [ -L /usr/bin/opencode ] && [ "$(readlink /usr/bin/opencode)" = "opencode-v2" ]; then
-  rm -f /usr/bin/opencode
-fi
-rm -f /usr/bin/opencode-v2.real
+rm -f /usr/bin/opencodeorig
 exit 0
 EOF
 chmod 0755 "$PKG_DIR/DEBIAN/postrm"
