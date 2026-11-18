@@ -1,0 +1,125 @@
+#!/bin/bash
+# MOS lifecycle hooks for the OpenCode v2 plugin.
+# MOS sources this file and calls these functions by name.
+
+PLG_DIR="/boot/optional/plugins/opencode-v2"
+HB="/usr/bin/plugins/opencode-v2"
+SHARE_DIR="/usr/share/opencode-v2-plugin"
+
+_setting() {
+  jq -r --arg k "$1" '.[$k] // empty' "$PLG_DIR/settings.json" 2>/dev/null
+}
+
+_server_enabled() {
+  [ "$(_setting server_enabled)" = "true" ]
+}
+
+_restore() {
+  mkdir -p "$PLG_DIR/bin" "$PLG_DIR/config" "$PLG_DIR/data" "$PLG_DIR/state"
+
+  for f in opencode-backend opencode-wrapper functions; do
+    if [ ! -f "$PLG_DIR/$f" ] && [ -f "$SHARE_DIR/$f" ]; then
+      cp -f "$SHARE_DIR/$f" "$PLG_DIR/$f"
+    fi
+  done
+
+  if [ ! -f "$PLG_DIR/settings.json" ] && [ -f "$SHARE_DIR/settings.json" ]; then
+    cp -f "$SHARE_DIR/settings.json" "$PLG_DIR/settings.json"
+  fi
+
+  if [ ! -x /usr/bin/plugins/opencode-v2 ]; then
+    mkdir -p /usr/bin/plugins
+    if [ -f "$PLG_DIR/opencode-backend" ]; then
+      cp -f "$PLG_DIR/opencode-backend" /usr/bin/plugins/opencode-v2
+    elif [ -f "$SHARE_DIR/opencode-backend" ]; then
+      cp -f "$SHARE_DIR/opencode-backend" /usr/bin/plugins/opencode-v2
+    fi
+    chmod 0755 /usr/bin/plugins/opencode-v2 2>/dev/null || true
+  fi
+
+  if [ ! -x /usr/bin/opencode ]; then
+    if [ -f "$PLG_DIR/opencode-wrapper" ]; then
+      cp -f "$PLG_DIR/opencode-wrapper" /usr/bin/opencode
+    elif [ -f "$SHARE_DIR/opencode-wrapper" ]; then
+      cp -f "$SHARE_DIR/opencode-wrapper" /usr/bin/opencode
+    fi
+    chmod 0755 /usr/bin/opencode 2>/dev/null || true
+  fi
+
+  if [ ! -x /usr/bin/opencode-v2 ]; then
+    if [ -f "$PLG_DIR/opencode-wrapper" ]; then
+      cp -f "$PLG_DIR/opencode-wrapper" /usr/bin/opencode-v2
+    elif [ -f "$SHARE_DIR/opencode-wrapper" ]; then
+      cp -f "$SHARE_DIR/opencode-wrapper" /usr/bin/opencode-v2
+    fi
+    chmod 0755 /usr/bin/opencode-v2 2>/dev/null || true
+  fi
+
+  # /boot may be noexec; keep an executable RAM copy.
+  if [ -x "$PLG_DIR/bin/opencode" ]; then
+    if [ ! -x /usr/bin/opencode-v2.real ] || [ "$PLG_DIR/bin/opencode" -nt /usr/bin/opencode-v2.real ]; then
+      install -m 0755 "$PLG_DIR/bin/opencode" /usr/bin/opencode-v2.real 2>/dev/null || true
+    fi
+  fi
+}
+
+install() {
+  _restore
+
+  local auto auto_start
+  auto="$(_setting auto_install)"
+  auto_start="$(_setting auto_start)"
+  [ -z "$auto" ] && auto=true
+  [ -z "$auto_start" ] && auto_start=true
+
+  if [ ! -x "$PLG_DIR/bin/opencode" ] && [ "$auto" = "true" ]; then
+    "$HB" install_binary >/dev/null 2>&1 || true
+  fi
+
+  if _server_enabled && [ "$auto_start" = "true" ] && [ -x "$PLG_DIR/bin/opencode" ]; then
+    "$HB" start >/dev/null 2>&1 || true
+  fi
+
+  return 0
+}
+
+uninstall() {
+  if [ -x "$HB" ]; then
+    "$HB" uninstall >/dev/null 2>&1 || true
+  else
+    rm -f /usr/bin/plugins/opencode-v2 /usr/bin/opencode /usr/bin/opencode-v2 /usr/bin/opencode-v2.real 2>/dev/null || true
+  fi
+}
+
+plugin_update() {
+  _restore
+  if _server_enabled && [ -x "$PLG_DIR/bin/opencode" ] && "$HB" status 2>/dev/null | jq -e '.running == true' >/dev/null 2>&1; then
+    "$HB" restart >/dev/null 2>&1 || true
+  fi
+}
+
+mos_start() {
+  _restore
+}
+
+mos_start_after_services() {
+  _restore
+
+  local auto auto_install
+  auto="$(_setting auto_start)"
+  auto_install="$(_setting auto_install)"
+  [ -z "$auto" ] && auto=true
+  [ -z "$auto_install" ] && auto_install=true
+
+  if [ ! -x "$PLG_DIR/bin/opencode" ] && [ "$auto_install" = "true" ]; then
+    "$HB" install_binary >/dev/null 2>&1 || true
+  fi
+
+  if _server_enabled && [ "$auto" = "true" ] && [ -x "$PLG_DIR/bin/opencode" ]; then
+    "$HB" start >/dev/null 2>&1 || true
+  fi
+}
+
+mos_osupdate() {
+  _restore
+}

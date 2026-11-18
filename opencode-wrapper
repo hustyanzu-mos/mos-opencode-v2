@@ -1,0 +1,65 @@
+#!/bin/sh
+# OpenCode v2 wrapper for MOS.
+#
+# Keeps OpenCode's config, data and service registration together, and blocks
+# OpenCode's own updater. The plugin page owns the binary version.
+#
+# Persistent data: /boot/optional/plugins/opencode-v2
+# Runtime binary:  /usr/bin/opencode-v2.real
+
+PLG_DIR="${OPENCODE_V2_PLUGIN_DIR:-/boot/optional/plugins/opencode-v2}"
+SETTINGS="$PLG_DIR/settings.json"
+BIN="${OPENCODE_V2_RUNTIME_BIN:-/usr/bin/opencode-v2.real}"
+
+case "${1:-}" in
+  update|upgrade)
+    echo "OpenCode self-update is disabled on MOS." >&2
+    echo "Use the OpenCode v2 plugin page in MOS to install a new version." >&2
+    exit 1
+    ;;
+  service)
+    case "${2:-}" in
+      start|restart|set|unset)
+        echo "OpenCode service changes are managed by the MOS plugin page." >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+
+if [ ! -x "$BIN" ]; then
+  if [ -x "$PLG_DIR/bin/opencode" ]; then
+    BIN="$PLG_DIR/bin/opencode"
+  else
+    echo "OpenCode is not installed yet. Open the OpenCode v2 plugin in MOS and click Install." >&2
+    exit 127
+  fi
+fi
+
+DATA_HOME=""
+if [ -f "$SETTINGS" ]; then
+  DATA_HOME=$(jq -r '.data_home // empty' "$SETTINGS" 2>/dev/null)
+fi
+
+if [ -z "$DATA_HOME" ] || [ "$DATA_HOME" = "null" ]; then
+  echo "OpenCode data directory is not configured." >&2
+  echo "Set 'data_home' on the OpenCode v2 plugin page." >&2
+  exit 1
+fi
+
+WORK_DIR="/"
+if [ -f "$SETTINGS" ]; then
+  WORK_DIR=$(jq -r '.work_dir // "/"' "$SETTINGS" 2>/dev/null)
+fi
+
+export XDG_CONFIG_HOME="$DATA_HOME/config"
+export XDG_DATA_HOME="$DATA_HOME/data"
+export XDG_STATE_HOME="$DATA_HOME/state"
+export OPENCODE_DISABLE_AUTOUPDATE=1
+
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" 2>/dev/null || true
+
+[ -d "$WORK_DIR" ] || WORK_DIR="/"
+cd "$WORK_DIR" 2>/dev/null || cd /
+
+exec "$BIN" "$@"

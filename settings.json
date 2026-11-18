@@ -1,0 +1,13 @@
+{
+  "auto_start": true,
+  "auto_install": true,
+  "server_enabled": false,
+  "hostname": "127.0.0.1",
+  "port": "4096",
+  "data_home": "",
+  "work_dir": "",
+  "version": "",
+  "pin_version": "",
+  "service_password": "",
+  "service_cors": ""
+}

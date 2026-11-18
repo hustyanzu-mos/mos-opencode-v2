@@ -1,0 +1,589 @@
+#!/bin/bash
+# OpenCode v2 backend for MOS.
+#
+# Called through POST /api/v1/mos/plugins/query with command "opencode-v2".
+#
+# Persistent layout (survives the RAM rootfs):
+#   /boot/optional/plugins/opencode-v2/
+#     bin/opencode             downloaded from GitHub releases
+#     config/opencode/         XDG_CONFIG_HOME
+#     data/                    XDG_DATA_HOME
+#     state/                   XDG_STATE_HOME
+#     settings.json            plugin settings
+#     opencode.log             stdout/stderr of the current service
+#
+# OpenCode's own updater is disabled. The plugin page owns the version, and
+# /update is harmless because the binary is not in a path OpenCode recognises
+# as an installation method.
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+
+PLG_DIR="${OPENCODE_V2_PLUGIN_DIR:-/boot/optional/plugins/opencode-v2}"
+USR_BIN_DIR="${OPENCODE_V2_USR_BIN_DIR:-/usr/bin}"
+BIN="$PLG_DIR/bin/opencode"
+RUNTIME_BIN="${OPENCODE_V2_RUNTIME_BIN:-$USR_BIN_DIR/opencode-v2.real}"
+SETTINGS="$PLG_DIR/settings.json"
+PID_FILE="${OPENCODE_V2_PID_FILE:-/var/run/mos-opencode-v2.pid}"
+LOG="$PLG_DIR/opencode.log"
+STATUS="$PLG_DIR/install-status.json"
+INSTALL_LOG="$PLG_DIR/install.log"
+LOCK_DIR="$PLG_DIR/.install.lock"
+SHARE_DIR="${OPENCODE_V2_SHARE_DIR:-/usr/share/opencode-v2-plugin}"
+GITHUB_API="${OPENCODE_V2_GITHUB_API:-https://api.github.com/repos/anomalyco/opencode}"
+DOWNLOAD_BASE="${OPENCODE_V2_DOWNLOAD_BASE:-https://github.com/anomalyco/opencode/releases/download}"
+
+HEADER=()
+GH_TOKEN=$(jq -r '.github // empty' /boot/config/system/tokens.json 2>/dev/null || true)
+if [ -n "$GH_TOKEN" ] && command -v decrypt_password >/dev/null 2>&1; then
+  TOKEN=$(decrypt_password "$GH_TOKEN" "tokens" 2>/dev/null || true)
+  if [ -n "$TOKEN" ]; then
+    HEADER=(-H "Authorization: Bearer $TOKEN")
+  fi
+fi
+
+fail() { echo "Error: $*" >&2; exit 1; }
+say() { echo "$*"; }
+
+# ---------------------------------------------------------------------------
+# settings
+
+write_default_settings() {
+  cat > "$SETTINGS" <<'JSON'
+{
+  "auto_start": true,
+  "auto_install": true,
+  "server_enabled": false,
+  "hostname": "127.0.0.1",
+  "port": "4096",
+  "data_home": "",
+  "work_dir": "",
+  "version": "",
+  "pin_version": "",
+  "service_password": "",
+  "service_cors": ""
+}
+JSON
+}
+
+ensure_settings() {
+  mkdir -p "$PLG_DIR"
+  if [ -f "$SETTINGS" ] && ! jq empty "$SETTINGS" >/dev/null 2>&1; then
+    cp -f "$SETTINGS" "$SETTINGS.bak.$(date +%s)" 2>/dev/null || true
+    rm -f "$SETTINGS"
+  fi
+  if [ ! -f "$SETTINGS" ]; then
+    if [ -f "$SHARE_DIR/settings.json" ]; then
+      cp -f "$SHARE_DIR/settings.json" "$SETTINGS"
+    else
+      write_default_settings
+    fi
+  fi
+}
+
+setting() {
+  jq -r --arg k "$1" '.[$k] // empty' "$SETTINGS" 2>/dev/null
+}
+
+set_setting() {
+  local key="$1" value="$2" tmp
+  ensure_settings
+  tmp="$(mktemp)" || return 1
+  if jq --arg k "$key" --arg v "$value" '.[$k] = $v' "$SETTINGS" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$SETTINGS"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+data_home() {
+  local d
+  d="$(setting data_home)"
+  [ -n "$d" ] || fail "data_home is not configured. Set a data directory in the plugin page first."
+  printf '%s' "$d"
+}
+
+server_enabled() {
+  [ "$(setting server_enabled)" = "true" ]
+}
+
+# ---------------------------------------------------------------------------
+# binary / release helpers
+
+platform_target() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo "linux-x64" ;;
+    aarch64|arm64) echo "linux-arm64" ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_version() {
+  case "$1" in
+    v*) printf '%s' "$1" ;;
+    *) printf 'v%s' "$1" ;;
+  esac
+}
+
+resolve_version() {
+  local pin latest json
+  pin="$(setting pin_version)"
+  if [ -n "$pin" ]; then
+    normalize_version "$pin"
+    return 0
+  fi
+
+  json="$(curl -fsSL --connect-timeout 15 --retry 2 "${HEADER[@]}" "$GITHUB_API/releases?per_page=100" 2>/dev/null)" || return 1
+  latest="$(printf '%s' "$json" | jq -r '
+    [ .[]
+      | select(.draft == false and .prerelease == false)
+      | .tag_name
+      | select(test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$")) ]
+    | sort_by(sub("^v"; "") | split(".") | map(tonumber))
+    | last // empty
+  ' 2>/dev/null)" || return 1
+  [ -n "$latest" ] || return 1
+  normalize_version "$latest"
+}
+
+installed_version() {
+  local exe=""
+  if [ -x "$RUNTIME_BIN" ]; then
+    exe="$RUNTIME_BIN"
+  elif [ -x "$BIN" ]; then
+    exe="$BIN"
+  fi
+  [ -n "$exe" ] || return 1
+  "$exe" --version 2>/dev/null | awk 'NR == 1 { print $2 }'
+}
+
+exec_bin() {
+  if [ -x "$RUNTIME_BIN" ]; then
+    printf '%s' "$RUNTIME_BIN"
+  else
+    printf '%s' "$BIN"
+  fi
+}
+
+ensure_binary() {
+  if [ -x "$RUNTIME_BIN" ]; then
+    return 0
+  fi
+  if [ -x "$BIN" ]; then
+    mkdir -p "$(dirname "$RUNTIME_BIN")" 2>/dev/null || true
+    install -m 0755 "$BIN" "$RUNTIME_BIN" 2>/dev/null || true
+  fi
+  [ -x "$RUNTIME_BIN" ] || fail "OpenCode is not installed yet. Open the plugin page and click Install."
+}
+
+verify_sha256() {
+  local file="$1" sums="$2" asset="$3" expected
+  expected="$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1; exit }' "$sums" 2>/dev/null)"
+  [ -n "$expected" ] || return 1
+  printf '%s  %s\n' "$expected" "$file" | sha256sum -c - >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# service
+
+write_update_config() {
+  local cfg tmp
+  cfg="$DATA_HOME/config/opencode/opencode.json"
+  mkdir -p "$(dirname "$cfg")"
+  if [ ! -f "$cfg" ]; then
+    cat > "$cfg" <<'JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "update": "disable"
+}
+JSON
+    chmod 600 "$cfg"
+    return 0
+  fi
+  # Do not rewrite JSONC files. The OPENCODE_DISABLE_AUTOUPDATE environment
+  # variable still turns background checks off.
+  if jq empty "$cfg" >/dev/null 2>&1; then
+    tmp="$(mktemp)" || return 1
+    if jq '.update = "disable"' "$cfg" > "$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$cfg"
+      chmod 600 "$cfg" 2>/dev/null || true
+    else
+      rm -f "$tmp"
+    fi
+  fi
+}
+
+write_service_config() {
+  local cfg tmp host port pass cors
+  cfg="$DATA_HOME/config/opencode/service.json"
+  host="$(setting hostname)"
+  port="$(setting port)"
+  pass="$(setting service_password)"
+  cors="$(setting service_cors)"
+  [ -n "$host" ] || host="127.0.0.1"
+  [ -n "$port" ] || port="4096"
+  case "$port" in
+    ''|*[!0-9]*) fail "service port must be a number" ;;
+  esac
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || fail "service port must be between 1 and 65535"
+
+  mkdir -p "$(dirname "$cfg")" "$DATA_HOME/data" "$DATA_HOME/state"
+  tmp="$(mktemp)" || fail "cannot create temporary file"
+  if [ -f "$cfg" ] && jq empty "$cfg" >/dev/null 2>&1; then
+    cp -f "$cfg" "$tmp"
+  else
+    printf '{}\n' > "$tmp"
+  fi
+
+  # disabled:true means OpenCode will not start a second service on its own.
+  # The plugin starts it explicitly with `serve --service` when enabled.
+  if ! jq --arg h "$host" --arg p "$port" '.hostname = $h | .port = ($p | tonumber) | .disabled = true' "$tmp" > "$tmp.next" 2>/dev/null; then
+    rm -f "$tmp" "$tmp.next"
+    fail "cannot write service configuration"
+  fi
+  mv -f "$tmp.next" "$tmp"
+
+  if [ -n "$pass" ]; then
+    jq --arg p "$pass" '.password = $p' "$tmp" > "$tmp.next" 2>/dev/null && mv -f "$tmp.next" "$tmp"
+  fi
+  if [ -n "$cors" ]; then
+    jq --arg c "$cors" '.cors = ($c | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)))' \
+      "$tmp" > "$tmp.next" 2>/dev/null && mv -f "$tmp.next" "$tmp"
+  fi
+
+  mv -f "$tmp" "$cfg"
+  chmod 600 "$cfg" 2>/dev/null || true
+}
+
+service_url() {
+  local exe="$1"
+  [ -x "$exe" ] || return 1
+  [ -n "${DATA_HOME:-}" ] || return 1
+  timeout 5 env HOME="${HOME:-/root}" \
+    XDG_CONFIG_HOME="$DATA_HOME/config" \
+    XDG_DATA_HOME="$DATA_HOME/data" \
+    XDG_STATE_HOME="$DATA_HOME/state" \
+    OPENCODE_DISABLE_AUTOUPDATE=1 \
+    "$exe" service status 2>/dev/null | head -n 1
+}
+
+running_pid() {
+  local pid=""
+  [ -f "$PID_FILE" ] && pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    printf '%s' "$pid"
+    return 0
+  fi
+  return 1
+}
+
+is_running() {
+  running_pid >/dev/null 2>&1 && return 0
+  local exe="${1:-}" url
+  [ -n "$exe" ] || exe="$(exec_bin)"
+  url="$(service_url "$exe" || true)"
+  [ -n "$url" ] && [ "$url" != "stopped" ] && return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# commands
+
+cmd_check_version() {
+  ensure_settings
+  local current latest update=false
+  current="$(installed_version 2>/dev/null || true)"
+  [ -n "$current" ] || current="not installed"
+  if ! latest="$(resolve_version)"; then
+    printf '{"current":"%s","latest":"","update_available":false,"error":"cannot reach release server"}\n' "$current"
+    return 1
+  fi
+  [ "$current" != "$latest" ] && update=true
+  jq -n --arg current "$current" --arg latest "$latest" --argjson update "$update" \
+    '{current:$current, latest:$latest, update_available:$update}'
+}
+
+cmd_status() {
+  ensure_settings
+  DATA_HOME="$(setting data_home)"
+  local exe pid="" url="" running=false version="" enabled=false
+  server_enabled && enabled=true
+  exe="$(exec_bin)"
+  if pid="$(running_pid 2>/dev/null)"; then
+    running=true
+  fi
+  if [ "$enabled" = true ] && [ -n "$DATA_HOME" ] && [ -x "$exe" ]; then
+    url="$(service_url "$exe" || true)"
+    if [ -n "$url" ] && [ "$url" != "stopped" ]; then
+      running=true
+    fi
+  fi
+  version="$(installed_version 2>/dev/null || true)"
+  jq -n --argjson running "$running" --argjson enabled "$enabled" --arg pid "$pid" --arg url "$url" --arg version "$version" \
+    '{running:$running, server_enabled:$enabled, pid:($pid|tonumber? // 0), url:$url, version:$version}'
+}
+
+cmd_start() {
+  ensure_settings
+  if ! server_enabled; then
+    say "OpenCode server is disabled. Enable 'Server' in the plugin page first."
+    cmd_status
+    return 0
+  fi
+  ensure_binary
+  DATA_HOME="$(data_home)"
+  write_service_config
+  write_update_config
+
+  local exe pid url i
+  exe="$(exec_bin)"
+  if is_running "$exe"; then
+    say "OpenCode is already running"
+    cmd_status
+    return 0
+  fi
+
+  mkdir -p "$DATA_HOME/data" "$DATA_HOME/state" "$(dirname "$LOG")"
+  : >> "$LOG"
+  nohup env HOME="${HOME:-/root}" \
+    XDG_CONFIG_HOME="$DATA_HOME/config" \
+    XDG_DATA_HOME="$DATA_HOME/data" \
+    XDG_STATE_HOME="$DATA_HOME/state" \
+    OPENCODE_DISABLE_AUTOUPDATE=1 \
+    "$exe" serve --service >> "$LOG" 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" > "$PID_FILE"
+
+  for i in $(seq 1 20); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    url="$(service_url "$exe" || true)"
+    if [ -n "$url" ] && [ "$url" != "stopped" ]; then
+      say "Started OpenCode (PID: $pid, $url)"
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  say "Failed to start OpenCode. Last log lines:"
+  tail -n 20 "$LOG" 2>/dev/null || true
+  rm -f "$PID_FILE"
+  return 1
+}
+
+cmd_stop() {
+  ensure_settings
+  DATA_HOME="$(setting data_home)"
+  local exe pid="" i
+  exe="$(exec_bin)"
+  if [ -n "$DATA_HOME" ] && [ -x "$exe" ]; then
+    timeout 15 env HOME="${HOME:-/root}" \
+      XDG_CONFIG_HOME="$DATA_HOME/config" \
+      XDG_DATA_HOME="$DATA_HOME/data" \
+      XDG_STATE_HOME="$DATA_HOME/state" \
+      OPENCODE_DISABLE_AUTOUPDATE=1 \
+      "$exe" service stop >/dev/null 2>&1 || true
+  fi
+  if [ -f "$PID_FILE" ]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      for i in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2
+      done
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+  fi
+  say "Stopped"
+}
+
+cmd_restart() {
+  cmd_stop >/dev/null 2>&1 || true
+  cmd_start
+}
+
+cmd_logs() {
+  local n="${1:-200}"
+  if [ -f "$LOG" ]; then
+    tail -n "$n" "$LOG"
+  else
+    echo "No log output yet."
+  fi
+}
+
+cmd_apply_service() {
+  ensure_settings
+  DATA_HOME="$(data_home)"
+  write_service_config
+  write_update_config
+  if ! server_enabled; then
+    cmd_stop >/dev/null 2>&1 || true
+    say "OpenCode server is disabled"
+    return 0
+  fi
+  if is_running; then
+    cmd_restart
+  else
+    say "Service settings saved"
+  fi
+}
+
+cmd_uninstall() {
+  cmd_stop >/dev/null 2>&1 || true
+  rm -f "$BIN" "$RUNTIME_BIN" "$PID_FILE" 2>/dev/null || true
+  say "Removed the OpenCode binary; config, data and sessions were kept."
+}
+
+# ---------------------------------------------------------------------------
+# async installer
+
+write_status() {
+  local state="$1" version="${2:-}" error="${3:-}" tmp="$STATUS.tmp"
+  mkdir -p "$PLG_DIR"
+  jq -n --arg state "$state" --arg version "$version" --arg error "$error" \
+    '{state:$state, version:$version, error:$error}' > "$tmp" 2>/dev/null || return 1
+  mv -f "$tmp" "$STATUS"
+}
+
+status_state() {
+  jq -r '.state // empty' "$STATUS" 2>/dev/null || true
+}
+
+cmd_install_status() {
+  local state="idle" pid="" running=false version="" error=""
+  if [ -d "$LOCK_DIR" ]; then
+    pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      running=true
+    fi
+  fi
+  if [ -f "$STATUS" ]; then
+    state="$(jq -r '.state // "idle"' "$STATUS" 2>/dev/null || echo idle)"
+    version="$(jq -r '.version // empty' "$STATUS" 2>/dev/null || true)"
+    error="$(jq -r '.error // empty' "$STATUS" 2>/dev/null || true)"
+  fi
+  if [ "$running" = true ]; then
+    state="running"
+  elif [ "$state" = "running" ]; then
+    state="failed"
+    [ -n "$error" ] || error="the installer stopped unexpectedly"
+  fi
+  jq -n --arg state "$state" --arg version "$version" --arg error "$error" --argjson running "$running" \
+    '{state:$state, running:$running, version:$version, error:$error}'
+}
+
+cmd_install_binary() {
+  ensure_settings
+  mkdir -p "$PLG_DIR"
+
+  if [ -d "$LOCK_DIR" ]; then
+    local oldpid=""
+    oldpid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+      printf '{"state":"running"}\n'
+      return 0
+    fi
+    rm -rf "$LOCK_DIR"
+  fi
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '{"state":"running"}\n'
+    return 0
+  fi
+
+  write_status running ""
+  : > "$INSTALL_LOG"
+  local self
+  self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$self" __install_worker >> "$INSTALL_LOG" 2>&1 &
+  else
+    nohup "$self" __install_worker >> "$INSTALL_LOG" 2>&1 &
+  fi
+  printf '%s\n' "$!" > "$LOCK_DIR/pid"
+  printf '{"state":"running"}\n'
+}
+
+cmd_install_worker() {
+  set -Eeuo pipefail
+  INSTALL_ERROR="install failed"
+  cleanup() {
+    local rc=$?
+    rm -rf "${TMP_DIR:-}" "$LOCK_DIR" 2>/dev/null || true
+    if [ "$rc" -ne 0 ] && [ "$(status_state)" != "done" ]; then
+      write_status failed "" "$INSTALL_ERROR" || true
+    fi
+    exit "$rc"
+  }
+  trap cleanup EXIT
+
+  ensure_settings
+  DATA_HOME="$(setting data_home || true)"
+  TMP_DIR="$(mktemp -d)" || { INSTALL_ERROR="cannot create a temporary directory"; exit 1; }
+
+  local version target asset url sums candidate was_running=0
+  version="$(resolve_version)" || { INSTALL_ERROR="cannot resolve the release version"; exit 1; }
+  write_status running "$version"
+  target="$(platform_target)" || { INSTALL_ERROR="unsupported architecture: $(uname -m)"; exit 1; }
+  asset="opencode-$target.tar.gz"
+  url="$DOWNLOAD_BASE/$version/$asset"
+  sums="$DOWNLOAD_BASE/$version/SHA256SUMS"
+
+  say "Installing OpenCode $version ($asset)"
+  curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 2 "${HEADER[@]}" -o "$TMP_DIR/$asset" "$url" \
+    || { INSTALL_ERROR="failed to download $url"; exit 1; }
+  curl -fsSL --connect-timeout 20 --retry 3 "${HEADER[@]}" -o "$TMP_DIR/SHA256SUMS" "$sums" \
+    || { INSTALL_ERROR="failed to download SHA256SUMS"; exit 1; }
+  verify_sha256 "$TMP_DIR/$asset" "$TMP_DIR/SHA256SUMS" "$asset" \
+    || { INSTALL_ERROR="checksum verification failed"; exit 1; }
+  tar -xzf "$TMP_DIR/$asset" -C "$TMP_DIR" \
+    || { INSTALL_ERROR="failed to extract the release archive"; exit 1; }
+  candidate="$(find "$TMP_DIR" -maxdepth 3 -type f -name opencode -print -quit)"
+  [ -n "$candidate" ] || { INSTALL_ERROR="the release archive has no opencode binary"; exit 1; }
+  chmod 0755 "$candidate"
+  "$candidate" --version >/dev/null 2>&1 \
+    || { INSTALL_ERROR="the downloaded binary does not run"; exit 1; }
+
+  if is_running; then
+    was_running=1
+    cmd_stop >/dev/null 2>&1 || true
+  fi
+
+  mkdir -p "$PLG_DIR/bin"
+  install -m 0755 "$candidate" "$BIN"
+  if [ ! -e "$RUNTIME_BIN" ] || [ -w "$(dirname "$RUNTIME_BIN")" ]; then
+    mkdir -p "$(dirname "$RUNTIME_BIN")" 2>/dev/null || true
+    install -m 0755 "$candidate" "$RUNTIME_BIN" 2>/dev/null || true
+  fi
+  set_setting version "$version"
+  write_status done "$version"
+  INSTALL_ERROR=""
+
+  if server_enabled && { [ "$was_running" = 1 ] || [ "$(setting auto_start)" = "true" ]; }; then
+    cmd_start >/dev/null 2>&1 || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+
+case "${1:-}" in
+  check_version) cmd_check_version ;;
+  install_binary|install|update) cmd_install_binary ;;
+  install_status) cmd_install_status ;;
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_restart ;;
+  status) cmd_status ;;
+  logs) shift; cmd_logs "${1:-200}" ;;
+  version) installed_version ;;
+  apply_service) cmd_apply_service ;;
+  uninstall) cmd_uninstall ;;
+  __install_worker) cmd_install_worker ;;
+  *)
+    echo "Usage: $0 {check_version|install_binary|install_status|start|stop|restart|status|logs|version|apply_service|uninstall}" >&2
+    exit 2
+    ;;
+esac
