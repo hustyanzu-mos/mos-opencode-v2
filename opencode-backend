@@ -372,6 +372,7 @@ cmd_start() {
   say "Failed to start OpenCode. Last log lines:"
   tail -n 20 "$LOG" 2>/dev/null || true
   rm -f "$PID_FILE"
+  write_service_config true >/dev/null 2>&1 || true
   return 1
 }
 
@@ -442,6 +443,7 @@ cmd_apply_service() {
 cmd_uninstall() {
   cmd_stop >/dev/null 2>&1 || true
   rm -f "$BIN" "$RUNTIME_BIN" "$PID_FILE" 2>/dev/null || true
+  set_setting version "" 2>/dev/null || true
   say "Removed the OpenCode binary; config, data and sessions were kept."
 }
 
