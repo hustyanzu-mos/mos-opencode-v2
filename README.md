@@ -39,8 +39,11 @@
 | 下载 | 同步，可能 60 秒超时 | 异步后台下载 + 轮询 |
 | 插件内部名 | `opencode` | `opencode-v2` |
 
-> 不要和官方 OpenCode 插件同时安装：两者都会提供 `/usr/bin/opencode`。
-> 如需切换，先卸载官方插件。
+本插件安装 `/usr/bin/opencode-v2`。如果 `/usr/bin/opencode` 还不存在，
+安装时会创建一个指向 `opencode-v2` 的符号链接。
+
+如果官方 OpenCode 插件已经占用了 `/usr/bin/opencode`，本插件不会覆盖它，
+也不会和它发生 dpkg 文件冲突；此时请使用 `opencode-v2`，或先卸载官方插件。
 
 ---
 

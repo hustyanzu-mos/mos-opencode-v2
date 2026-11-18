@@ -59,9 +59,8 @@ jobs:
           cp opencode-backend ${PKG_DIR}/usr/bin/plugins/opencode-v2
           chmod 0755 ${PKG_DIR}/usr/bin/plugins/opencode-v2
 
-          cp opencode-wrapper ${PKG_DIR}/usr/bin/opencode
           cp opencode-wrapper ${PKG_DIR}/usr/bin/opencode-v2
-          chmod 0755 ${PKG_DIR}/usr/bin/opencode ${PKG_DIR}/usr/bin/opencode-v2
+          chmod 0755 ${PKG_DIR}/usr/bin/opencode-v2
 
           cp opencode-backend ${PKG_DIR}/usr/share/opencode-v2-plugin/
           cp opencode-wrapper ${PKG_DIR}/usr/share/opencode-v2-plugin/
@@ -90,7 +89,10 @@ jobs:
           PLG=/boot/optional/plugins/opencode-v2
           SHARE=/usr/share/opencode-v2-plugin
           mkdir -p "$PLG/bin" "$PLG/config" "$PLG/data" "$PLG/state"
-          chmod 0755 /usr/bin/plugins/opencode-v2 /usr/bin/opencode /usr/bin/opencode-v2 2>/dev/null || true
+          chmod 0755 /usr/bin/plugins/opencode-v2 /usr/bin/opencode-v2 2>/dev/null || true
+          if [ ! -e /usr/bin/opencode ] && [ ! -L /usr/bin/opencode ]; then
+            ln -s opencode-v2 /usr/bin/opencode
+          fi
           for f in opencode-backend opencode-wrapper functions; do
             cp -f "$SHARE/$f" "$PLG/$f"
           done
@@ -120,6 +122,9 @@ jobs:
 
           cat > ${PKG_DIR}/DEBIAN/postrm << 'EOF'
           #!/bin/bash
+          if [ -L /usr/bin/opencode ] && [ "$(readlink /usr/bin/opencode)" = "opencode-v2" ]; then
+            rm -f /usr/bin/opencode
+          fi
           rm -f /usr/bin/opencode-v2.real
           exit 0
           EOF

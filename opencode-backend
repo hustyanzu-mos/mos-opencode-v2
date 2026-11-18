@@ -44,6 +44,7 @@ fi
 
 fail() { echo "Error: $*" >&2; exit 1; }
 say() { echo "$*"; }
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown; }
 
 # ---------------------------------------------------------------------------
 # settings
@@ -463,10 +464,10 @@ status_state() {
 }
 
 cmd_install_status() {
-  local state="idle" pid="" running=false version="" error=""
+  local state="idle" pid="" boot="" running=false version="" error=""
   if [ -d "$LOCK_DIR" ]; then
-    pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    read -r boot pid < "$LOCK_DIR/pid" 2>/dev/null || true
+    if [ "$boot" = "$(boot_id)" ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       running=true
     fi
   fi
@@ -490,9 +491,9 @@ cmd_install_binary() {
   mkdir -p "$PLG_DIR"
 
   if [ -d "$LOCK_DIR" ]; then
-    local oldpid=""
-    oldpid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-    if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+    local oldboot="" oldpid=""
+    read -r oldboot oldpid < "$LOCK_DIR/pid" 2>/dev/null || true
+    if [ "$oldboot" = "$(boot_id)" ] && [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
       printf '{"state":"running"}\n'
       return 0
     fi
@@ -512,7 +513,7 @@ cmd_install_binary() {
   else
     nohup "$self" __install_worker >> "$INSTALL_LOG" 2>&1 &
   fi
-  printf '%s\n' "$!" > "$LOCK_DIR/pid"
+  printf '%s %s\n' "$(boot_id)" "$!" > "$LOCK_DIR/pid"
   printf '{"state":"running"}\n'
 }
 

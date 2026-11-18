@@ -37,15 +37,6 @@ _restore() {
     chmod 0755 /usr/bin/plugins/opencode-v2 2>/dev/null || true
   fi
 
-  if [ ! -x /usr/bin/opencode ]; then
-    if [ -f "$PLG_DIR/opencode-wrapper" ]; then
-      cp -f "$PLG_DIR/opencode-wrapper" /usr/bin/opencode
-    elif [ -f "$SHARE_DIR/opencode-wrapper" ]; then
-      cp -f "$SHARE_DIR/opencode-wrapper" /usr/bin/opencode
-    fi
-    chmod 0755 /usr/bin/opencode 2>/dev/null || true
-  fi
-
   if [ ! -x /usr/bin/opencode-v2 ]; then
     if [ -f "$PLG_DIR/opencode-wrapper" ]; then
       cp -f "$PLG_DIR/opencode-wrapper" /usr/bin/opencode-v2
@@ -53,6 +44,12 @@ _restore() {
       cp -f "$SHARE_DIR/opencode-wrapper" /usr/bin/opencode-v2
     fi
     chmod 0755 /usr/bin/opencode-v2 2>/dev/null || true
+  fi
+
+  # Do not take over /usr/bin/opencode when another plugin already owns it.
+  # The official mos-opencode installs its own wrapper at that path.
+  if [ ! -e /usr/bin/opencode ] && [ ! -L /usr/bin/opencode ] && [ -x /usr/bin/opencode-v2 ]; then
+    ln -s opencode-v2 /usr/bin/opencode 2>/dev/null || true
   fi
 
   # /boot may be noexec; keep an executable RAM copy.
@@ -87,7 +84,10 @@ uninstall() {
   if [ -x "$HB" ]; then
     "$HB" uninstall >/dev/null 2>&1 || true
   else
-    rm -f /usr/bin/plugins/opencode-v2 /usr/bin/opencode /usr/bin/opencode-v2 /usr/bin/opencode-v2.real 2>/dev/null || true
+    rm -f /usr/bin/plugins/opencode-v2 /usr/bin/opencode-v2 /usr/bin/opencode-v2.real 2>/dev/null || true
+    if [ -L /usr/bin/opencode ] && [ "$(readlink /usr/bin/opencode)" = "opencode-v2" ]; then
+      rm -f /usr/bin/opencode 2>/dev/null || true
+    fi
   fi
 }
 
